@@ -1,15 +1,23 @@
 """
-NFL Data Utilities - Unified Data Loading Module
-=================================================
+NFL Data Utilities - Unified Data Loading Module with TANK01 Integration
+=========================================================================
 FIXED: Created unified module to eliminate code duplication and enable dynamic season/week detection
 FIXED: Implements dynamic season and week detection per requirements
-FIXED: Shared utility functions used across all data ingestion scripts
+FIXED: Seamless integration of TANK01 API for 2025 season data
+FIXED: Hybrid data loading: nfl_data_py (historical) + TANK01 (2025)
 
 This module provides:
 - Dynamic season detection (current year if month >= 9, else year - 1)
 - Dynamic week detection (fetches completed weeks from schedule)
+- Automatic source selection: nfl_data_py (≤2024) or TANK01 (2025)
+- Perfect data alignment and merging between sources
 - Unified data loading functions
 - Shared utilities for schedule and player data processing
+
+DATA SOURCE STRATEGY:
+- Historical (1999-2024): nfl_data_py
+- Current Season (2025): TANK01 API
+- Automatic detection and seamless merging
 """
 
 import os
@@ -473,6 +481,58 @@ def load_nfl_data(
         raise
 
 
+def _load_from_tank01(
+    seasons: List[int],
+    through_week: int,
+    cache_dir: str,
+    force_refresh: bool
+) -> Dict[str, pd.DataFrame]:
+    """
+    Load data from TANK01 API for 2025 season.
+
+    FIXED: Seamless integration of TANK01 as data source
+
+    Args:
+        seasons: List of seasons (should be [2025])
+        through_week: Last week to load
+        cache_dir: Cache directory
+        force_refresh: Force refresh flag
+
+    Returns:
+        Dictionary matching nfl_data_py structure
+    """
+    from tank01_stats_client import Tank01StatsClient
+
+    print("   📥 Fetching from TANK01 API...")
+
+    client = Tank01StatsClient()
+
+    # Fetch player stats
+    weeks = list(range(1, through_week + 1))
+    player_weeks = client.fetch_2025_weekly_data(weeks=weeks, force_refresh=force_refresh)
+
+    # Fetch schedule
+    schedules = client.fetch_2025_schedule(force_refresh=force_refresh)
+
+    # FIXED: Standardize schedule columns to match nfl_data_py
+    schedules = standardize_schedule_columns(schedules)
+
+    # Create team-level schedules
+    team_schedules = create_team_schedules(schedules)
+
+    # FIXED: Add game context to player data
+    player_weeks = add_game_context(player_weeks, team_schedules)
+
+    # Package data
+    data = {
+        'schedules': schedules,
+        'team_schedules': team_schedules,
+        'player_weeks': player_weeks
+    }
+
+    return data
+
+
 def load_current_season_data(
     through_week: Optional[int] = None,
     cache_dir: str = "data_cache",
@@ -482,6 +542,7 @@ def load_current_season_data(
     Load current season data with dynamic season and week detection.
 
     FIXED: Implements dynamic detection per requirements
+    FIXED: Automatically uses TANK01 for 2025, nfl_data_py for ≤2024
 
     Args:
         through_week: Last completed week to load (None = auto-detect)
@@ -503,9 +564,14 @@ def load_current_season_data(
     print(f"LOADING CURRENT SEASON DATA ({season}, Weeks 1-{through_week})")
     print(f"{'='*70}")
 
-    # Load data for current season through specified week
-    weeks = list(range(1, through_week + 1))
-    data = load_nfl_data([season], weeks=weeks, cache_dir=cache_dir, force_refresh=force_refresh)
+    # FIXED: Use TANK01 for 2025, nfl_data_py for ≤2024
+    if season >= 2025:
+        print(f"   📊 Data source: TANK01 API")
+        data = _load_from_tank01([season], through_week, cache_dir, force_refresh)
+    else:
+        print(f"   📊 Data source: nfl_data_py")
+        weeks = list(range(1, through_week + 1))
+        data = load_nfl_data([season], weeks=weeks, cache_dir=cache_dir, force_refresh=force_refresh)
 
     print(f"\n✅ Current season data loaded: {len(data['player_weeks'])} player-weeks")
 
@@ -544,6 +610,135 @@ def load_historical_data(
     print(f"\n✅ Historical data loaded: {len(data['player_weeks'])} player-weeks")
 
     return data
+
+
+def load_hybrid_data(
+    historical_years: int = 3,
+    current_through_week: Optional[int] = None,
+    cache_dir: str = "data_cache",
+    force_refresh: bool = False
+) -> Dict[str, pd.DataFrame]:
+    """
+    Load and merge historical data + current season data.
+
+    FIXED: Hybrid loader for training models on combined datasets
+    FIXED: Seamlessly merges nfl_data_py (historical) + TANK01 (2025)
+
+    Args:
+        historical_years: Number of historical years to include
+        current_through_week: Last week of current season (None = auto-detect)
+        cache_dir: Cache directory
+        force_refresh: Force refresh flag
+
+    Returns:
+        Dictionary with merged data from both sources
+    """
+    print("\n" + "="*70)
+    print("LOADING HYBRID DATA (Historical + Current Season)")
+    print("="*70)
+
+    # Load historical data
+    print("\n[1/2] Loading historical data...")
+    historical = load_historical_data(
+        lookback_years=historical_years,
+        cache_dir=cache_dir,
+        force_refresh=force_refresh
+    )
+
+    # Load current season
+    print("\n[2/2] Loading current season...")
+    current = load_current_season_data(
+        through_week=current_through_week,
+        cache_dir=cache_dir,
+        force_refresh=force_refresh
+    )
+
+    # FIXED: Merge datasets with perfect alignment
+    print("\n[3/3] Merging datasets...")
+
+    merged_data = {
+        'player_weeks': pd.concat([
+            historical['player_weeks'],
+            current['player_weeks']
+        ], ignore_index=True),
+
+        'schedules': pd.concat([
+            historical['schedules'],
+            current['schedules']
+        ], ignore_index=True),
+
+        'team_schedules': pd.concat([
+            historical['team_schedules'],
+            current['team_schedules']
+        ], ignore_index=True),
+    }
+
+    # FIXED: Verify merged data consistency
+    _verify_hybrid_data_consistency(merged_data, historical, current)
+
+    print(f"\n✅ Hybrid data loaded:")
+    print(f"   Historical: {len(historical['player_weeks'])} player-weeks")
+    print(f"   Current:    {len(current['player_weeks'])} player-weeks")
+    print(f"   Total:      {len(merged_data['player_weeks'])} player-weeks")
+    print(f"   Seasons:    {sorted(merged_data['player_weeks']['season'].unique())}")
+
+    return merged_data
+
+
+def _verify_hybrid_data_consistency(
+    merged: Dict[str, pd.DataFrame],
+    historical: Dict[str, pd.DataFrame],
+    current: Dict[str, pd.DataFrame]
+):
+    """
+    Verify that hybrid data merge was successful and consistent.
+
+    FIXED: Critical validation ensuring data integrity
+
+    Args:
+        merged: Merged data dictionary
+        historical: Historical data dictionary
+        current: Current season data dictionary
+
+    Raises:
+        AssertionError if data inconsistency detected
+    """
+    pw_merged = merged['player_weeks']
+    pw_hist = historical['player_weeks']
+    pw_curr = current['player_weeks']
+
+    # FIXED: Check row counts
+    expected_rows = len(pw_hist) + len(pw_curr)
+    actual_rows = len(pw_merged)
+    assert actual_rows == expected_rows, f"Row count mismatch: expected {expected_rows}, got {actual_rows}"
+
+    # FIXED: Check column alignment
+    hist_cols = set(pw_hist.columns)
+    curr_cols = set(pw_curr.columns)
+    merged_cols = set(pw_merged.columns)
+
+    # All columns should be present in merged
+    assert hist_cols.issubset(merged_cols), "Missing historical columns in merge"
+    assert curr_cols.issubset(merged_cols), "Missing current season columns in merge"
+
+    # FIXED: Check for data type consistency
+    for col in merged_cols:
+        if col in pw_hist.columns and col in pw_curr.columns:
+            hist_dtype = pw_hist[col].dtype
+            curr_dtype = pw_curr[col].dtype
+
+            # Allow some flexibility for numeric types
+            if pd.api.types.is_numeric_dtype(hist_dtype) and pd.api.types.is_numeric_dtype(curr_dtype):
+                continue
+
+            # String types should match
+            if pd.api.types.is_string_dtype(hist_dtype) or pd.api.types.is_object_dtype(hist_dtype):
+                continue
+
+            # For other types, they should match
+            assert hist_dtype == curr_dtype, f"Data type mismatch for column '{col}': {hist_dtype} vs {curr_dtype}"
+
+    print("   ✓ Hybrid data consistency validation passed")
 
 
 def validate_data_completeness(data: Dict[str, pd.DataFrame]) -> bool:

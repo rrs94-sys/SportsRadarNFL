@@ -23,8 +23,12 @@ from weather_client import WeatherClient
 from sportsgameodds_client import SportsGameOddsClient
 from calibration_evaluation import CalibrationEvaluator
 
-# FIXED: Import dynamic detection utilities
-from nfl_data_utils import get_current_season, get_latest_completed_week
+# FIXED: Import dynamic detection utilities and hybrid loader
+from nfl_data_utils import (
+    get_current_season,
+    get_latest_completed_week,
+    load_hybrid_data  # NEW: For merging historical + 2025 data
+)
 
 
 class ModelTrainer:
@@ -56,6 +60,7 @@ class ModelTrainer:
 
         FIXED: Dynamic season and week detection
         FIXED: Auto-detect latest week if through_week is None
+        FIXED: Uses hybrid loader for seamless nfl_data_py + TANK01 integration
 
         Args:
             through_week: Last COMPLETED week for current season (None = auto-detect)
@@ -72,50 +77,43 @@ class ModelTrainer:
             through_week = get_latest_completed_week(current_season)
             print(f"📊 Auto-detected latest completed week: {through_week}")
 
+        # FIXED: Use hybrid loader that automatically handles nfl_data_py + TANK01
         print(f"\n{'='*70}")
         print(f"LOADING DATA: Historical + Current ({current_season})")
+        print(f"AUTOMATIC SOURCE SELECTION: nfl_data_py (≤2024) + TANK01 (2025)")
         print(f"{'='*70}")
 
-        # Load historical seasons (2022, 2023, 2024)
-        print(f"\n[1/2] Loading historical seasons...")
-        historical_data = self.historical_loader.load_historical_seasons(force_refresh)
+        # Load combined data using hybrid loader
+        combined_data = load_hybrid_data(
+            historical_years=3,
+            current_through_week=through_week,
+            cache_dir=self.config.CACHE_DIR,
+            force_refresh=force_refresh
+        )
 
-        # Load current season (2025)
-        print(f"\n[2/2] Loading current season (2025, weeks 1-{through_week})...")
-        current_data = self.current_loader.load_2025_data(through_week, force_refresh)
+        # FIXED: Apply weights to player_weeks for training
+        player_weeks = combined_data['player_weeks'].copy()
 
-        # Apply weights to player_weeks
-        print(f"\n[3/3] Combining with weights...")
-        historical_pw = historical_data['player_weeks'].copy()
-        historical_pw['weight'] = self.config.HISTORICAL_WEIGHT
+        # Separate historical vs current for weighting
+        current_season = get_current_season()
+        historical_mask = player_weeks['season'] < current_season
+        current_mask = player_weeks['season'] == current_season
 
-        current_pw = current_data['player_weeks'].copy()
-        current_pw['weight'] = self.config.RECENT_WEIGHT
+        player_weeks.loc[historical_mask, 'weight'] = self.config.HISTORICAL_WEIGHT
+        player_weeks.loc[current_mask, 'weight'] = self.config.RECENT_WEIGHT
 
-        # Combine player-weeks
-        combined_player_weeks = pd.concat([historical_pw, current_pw], ignore_index=True)
+        combined_data['player_weeks'] = player_weeks
 
-        # Combine schedules
-        combined_schedules = pd.concat([
-            historical_data['schedules'],
-            current_data['schedules']
-        ], ignore_index=True)
+        # Print summary
+        hist_count = historical_mask.sum()
+        curr_count = current_mask.sum()
 
-        combined_team_schedules = pd.concat([
-            historical_data['team_schedules'],
-            current_data['team_schedules']
-        ], ignore_index=True)
+        print(f"\n   ✅ Combined data with weights:")
+        print(f"      Historical: {hist_count} player-weeks (weight={self.config.HISTORICAL_WEIGHT})")
+        print(f"      Current:    {curr_count} player-weeks (weight={self.config.RECENT_WEIGHT})")
+        print(f"      Total:      {len(player_weeks)} player-weeks")
 
-        print(f"   ✅ Combined data:")
-        print(f"      Historical: {len(historical_pw)} player-weeks (weight={self.config.HISTORICAL_WEIGHT})")
-        print(f"      Current:    {len(current_pw)} player-weeks (weight={self.config.RECENT_WEIGHT})")
-        print(f"      Total:      {len(combined_player_weeks)} player-weeks")
-
-        return {
-            'player_weeks': combined_player_weeks,
-            'schedules': combined_schedules,
-            'team_schedules': combined_team_schedules
-        }
+        return combined_data
 
     def run_backtest(self, through_week: int = 7):
         """
