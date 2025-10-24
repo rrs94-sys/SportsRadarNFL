@@ -543,6 +543,7 @@ def load_current_season_data(
 
     FIXED: Implements dynamic detection per requirements
     FIXED: Automatically uses TANK01 for 2025, nfl_data_py for ≤2024
+    FIXED: Graceful fallback to nfl_data_py if TANK01 unavailable
 
     Args:
         through_week: Last completed week to load (None = auto-detect)
@@ -565,9 +566,28 @@ def load_current_season_data(
     print(f"{'='*70}")
 
     # FIXED: Use TANK01 for 2025, nfl_data_py for ≤2024
+    # FIXED: Gracefully fall back to nfl_data_py if TANK01 fails
     if season >= 2025:
-        print(f"   📊 Data source: TANK01 API")
-        data = _load_from_tank01([season], through_week, cache_dir, force_refresh)
+        print(f"   📊 Attempting data source: TANK01 API")
+        try:
+            from tank01_stats_client import Tank01APIAccessError
+            data = _load_from_tank01([season], through_week, cache_dir, force_refresh)
+        except Tank01APIAccessError as e:
+            print(f"\n⚠️  TANK01 API UNAVAILABLE")
+            print(f"   {str(e)}")
+            print(f"\n   🔄 Falling back to nfl_data_py for season {season}")
+            print(f"   Note: Data may not be available or may be incomplete.")
+            weeks = list(range(1, through_week + 1))
+            try:
+                data = load_nfl_data([season], weeks=weeks, cache_dir=cache_dir, force_refresh=force_refresh)
+            except Exception as fallback_error:
+                print(f"\n❌ ERROR: Neither TANK01 nor nfl_data_py have data for {season}")
+                print(f"   TANK01 error: API access denied")
+                print(f"   nfl_data_py error: {str(fallback_error)}")
+                raise ValueError(
+                    f"No data source available for {season} season. "
+                    f"TANK01 API key may need renewal, and nfl_data_py doesn't have {season} data yet."
+                )
     else:
         print(f"   📊 Data source: nfl_data_py")
         weeks = list(range(1, through_week + 1))

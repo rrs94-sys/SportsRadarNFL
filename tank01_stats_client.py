@@ -26,6 +26,20 @@ from phase1_config import Config
 
 
 # ============================================================================
+# CUSTOM EXCEPTIONS
+# ============================================================================
+
+class Tank01APIAccessError(Exception):
+    """Raised when TANK01 API key is invalid or access is denied"""
+    pass
+
+
+class Tank01DataUnavailableError(Exception):
+    """Raised when requested data is not available from TANK01"""
+    pass
+
+
+# ============================================================================
 # FIELD MAPPING: TANK01 → nfl_data_py Format
 # ============================================================================
 
@@ -399,7 +413,7 @@ class Tank01StatsClient:
         """
         Make API call with exponential backoff retry.
 
-        FIXED: Robust error handling for network issues
+        FIXED: Robust error handling for network issues and API access errors
 
         Args:
             endpoint: API endpoint
@@ -408,6 +422,9 @@ class Tank01StatsClient:
 
         Returns:
             JSON response or None
+
+        Raises:
+            Tank01APIAccessError: If API key is invalid or access denied (403)
         """
         url = f"{self.base_url}{endpoint}"
 
@@ -419,11 +436,29 @@ class Tank01StatsClient:
                     params=params,
                     timeout=30
                 )
+
+                # FIXED: Check for 403 Forbidden - API key issue
+                if response.status_code == 403:
+                    raise Tank01APIAccessError(
+                        f"TANK01 API Access Denied (403 Forbidden). "
+                        f"The API key may be invalid, expired, or lack permissions for endpoint '{endpoint}'. "
+                        f"Please verify the TANK_API_KEY in phase1_config.py or contact RapidAPI support."
+                    )
+
                 response.raise_for_status()
                 return response.json()
 
+            except Tank01APIAccessError:
+                # Don't retry 403 errors - reraise immediately
+                raise
+
             except requests.exceptions.RequestException as e:
                 wait_time = (2 ** attempt)  # Exponential backoff
+
+                # Don't retry on 404 - data simply doesn't exist
+                if "404" in str(e):
+                    print(f"    ℹ️  Data not available (404) - may not be published yet")
+                    return None
 
                 if attempt < max_retries - 1:
                     print(f"    ⚠️  API call failed, retrying in {wait_time}s... ({e})")
