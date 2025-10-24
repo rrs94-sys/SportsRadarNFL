@@ -4,29 +4,139 @@ NFL Data Utilities - Unified Data Loading Module with TANK01 Integration
 FIXED: Created unified module to eliminate code duplication and enable dynamic season/week detection
 FIXED: Implements dynamic season and week detection per requirements
 FIXED: Seamless integration of TANK01 API for 2025 season data
-FIXED: Hybrid data loading: nfl_data_py (historical) + TANK01 (2025)
+FIXED: Hybrid data loading: nflreadpy (historical) + TANK01 (2025)
+FIXED: Migration from nfl_data_py (deprecated) to nflreadpy for 2025 support
 
 This module provides:
 - Dynamic season detection (current year if month >= 9, else year - 1)
 - Dynamic week detection (fetches completed weeks from schedule)
-- Automatic source selection: nfl_data_py (≤2024) or TANK01 (2025)
+- Automatic source selection: nflreadpy (≤2024) or TANK01 (2025)
 - Perfect data alignment and merging between sources
 - Unified data loading functions
 - Shared utilities for schedule and player data processing
+- Compatibility shim for nfl_data_py → nflreadpy migration
 
 DATA SOURCE STRATEGY:
-- Historical (1999-2024): nfl_data_py
+- Historical (1999-2024): nflreadpy (drop-in replacement for nfl_data_py)
 - Current Season (2025): TANK01 API
 - Automatic detection and seamless merging
+
+NOTE: nfl_data_py was deprecated in Sep 2025. This module now uses nflreadpy
+      (Polars-first, with automatic pandas conversion) for all historical data.
 """
 
 import os
 import pickle
 import pandas as pd
 import numpy as np
-import nfl_data_py as nfl
 from datetime import datetime
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Union, Iterable
+
+# ============================================================================
+# NFLREADPY COMPATIBILITY SHIM
+# ============================================================================
+# nfl_data_py was deprecated in Sep 2025 → migrated to nflreadpy
+# This shim provides drop-in compatibility while using nflreadpy internally
+
+try:
+    import nflreadpy as nfl_new  # Polars-first API
+except ImportError as e:
+    raise RuntimeError(
+        "Missing dependency nflreadpy. Install with: pip install -U nflreadpy"
+    ) from e
+
+
+def _to_year_list(seasons: Union[int, Iterable[int], bool, None]) -> List[int] | bool:
+    """
+    Normalize season input. Return list[int] or True (nflreadpy supports seasons=True for 'all available').
+    """
+    if seasons is True:
+        return True
+    if seasons is None:
+        return True
+    if isinstance(seasons, int):
+        return [seasons]
+    return list(seasons)
+
+
+def import_weekly_data(seasons: Union[int, Iterable[int], bool, None]) -> pd.DataFrame:
+    """
+    Replacement for nfl_data_py.import_weekly_data(...).
+    Returns a pandas DataFrame of game-level (weekly) player stats.
+
+    FIXED: Migrated from nfl_data_py to nflreadpy for 2025 support
+    """
+    yrs = _to_year_list(seasons)
+    # nflreadpy returns Polars DataFrame; convert to pandas for compatibility
+    df_pl = nfl_new.load_player_stats(yrs)  # weekly/game-level player stats
+    df = df_pl.to_pandas()
+
+    # Normalize column names to match nfl_data_py expectations
+    # nflreadpy uses slightly different column names in some cases
+    if 'player_display_name' in df.columns and 'player_name' not in df.columns:
+        df = df.rename(columns={'player_display_name': 'player_name'})
+
+    return df
+
+
+def import_schedules(seasons: Union[int, Iterable[int], bool, None]) -> pd.DataFrame:
+    """
+    Replacement for nfl_data_py.import_schedules(...).
+    Returns a pandas DataFrame of game schedules.
+
+    FIXED: Migrated from nfl_data_py to nflreadpy
+    """
+    yrs = _to_year_list(seasons)
+    df_pl = nfl_new.load_schedules(yrs)
+    return df_pl.to_pandas()
+
+
+def import_team_desc() -> pd.DataFrame:
+    """
+    Replacement for nfl_data_py.import_team_desc().
+    Returns team descriptions/metadata.
+
+    FIXED: Migrated from nfl_data_py to nflreadpy
+    """
+    df_pl = nfl_new.load_teams()
+    return df_pl.to_pandas()
+
+
+def import_injuries_safe(seasons: Union[int, Iterable[int], bool, None]) -> pd.DataFrame:
+    """
+    Injury data with 2025 guard.
+
+    FIXED: 2025 injuries are unavailable upstream. Return empty for 2025 to avoid breakage.
+    """
+    yrs = _to_year_list(seasons)
+
+    try:
+        df_pl = nfl_new.load_injuries(yrs)  # may not include 2025 at all
+        df = df_pl.to_pandas()
+    except Exception as e:
+        # If upstream transiently fails or injuries endpoint missing, return empty
+        print(f"⚠️  Injuries unavailable: {e}. Returning empty DataFrame.")
+        return pd.DataFrame()
+
+    # Explicit 2025 guard: drop any 2025 rows to avoid downstream assumptions
+    if "season" in df.columns:
+        df = df[df["season"] <= 2024]
+    else:
+        # No season column — keep empty to be safe
+        df = pd.DataFrame(columns=["season"])
+
+    return df
+
+
+# Legacy compatibility: expose as 'nfl' module for backwards compatibility
+class _NFLDataShim:
+    """Compatibility shim to mimic nfl_data_py module interface"""
+    import_weekly_data = staticmethod(import_weekly_data)
+    import_schedules = staticmethod(import_schedules)
+    import_team_desc = staticmethod(import_team_desc)
+    import_injuries = staticmethod(import_injuries_safe)
+
+nfl = _NFLDataShim()
 
 
 # ============================================================================
@@ -66,6 +176,7 @@ def _verify_season_data_exists(season: int) -> int:
     Verify that data exists for a given season, fall back to most recent if not.
 
     FIXED: Core fix for 404 errors - checks data availability before fetching
+    FIXED: Now uses nflreadpy via compatibility shim
 
     Args:
         season: Proposed season to check
@@ -73,13 +184,11 @@ def _verify_season_data_exists(season: int) -> int:
     Returns:
         Season that actually has data available
     """
-    import nfl_data_py as nfl
-
     # Try to load a minimal schedule to verify data exists
     max_attempts = 5
     for attempt in range(max_attempts):
         try_season = season - attempt
-        if try_season < 1999:  # nfl_data_py starts at 1999
+        if try_season < 1999:  # nflreadpy/nfl_data_py starts at 1999
             break
 
         try:
