@@ -1,6 +1,9 @@
 """
 Main Training Pipeline with Time-Series Backtesting
 Trains market-optimized models for all prop types
+
+FIXED: Added dynamic season and week detection
+FIXED: Imports from nfl_data_utils for season/week detection
 """
 
 import pandas as pd
@@ -19,6 +22,9 @@ from tank_injury_client import TankInjuryClient
 from weather_client import WeatherClient
 from sportsgameodds_client import SportsGameOddsClient
 from calibration_evaluation import CalibrationEvaluator
+
+# FIXED: Import dynamic detection utilities
+from nfl_data_utils import get_current_season, get_latest_completed_week
 
 
 class ModelTrainer:
@@ -44,19 +50,30 @@ class ModelTrainer:
 
         self.trained_models = {}
 
-    def _load_and_combine_data(self, through_week: int = 7, force_refresh: bool = False) -> Dict:
+    def _load_and_combine_data(self, through_week: int = None, force_refresh: bool = False) -> Dict:
         """
-        Load and combine historical + current season data with proper weighting
+        Load and combine historical + current season data with proper weighting.
+
+        FIXED: Dynamic season and week detection
+        FIXED: Auto-detect latest week if through_week is None
 
         Args:
-            through_week: Last COMPLETED week for current season
+            through_week: Last COMPLETED week for current season (None = auto-detect)
             force_refresh: Force re-download
 
         Returns:
             dict with combined player_weeks, schedules, team_schedules
         """
+        # FIXED: Dynamic season detection
+        current_season = get_current_season()
+
+        # FIXED: Auto-detect latest week if not specified
+        if through_week is None:
+            through_week = get_latest_completed_week(current_season)
+            print(f"📊 Auto-detected latest completed week: {through_week}")
+
         print(f"\n{'='*70}")
-        print(f"LOADING DATA: Historical (2022-2024) + Current (2025)")
+        print(f"LOADING DATA: Historical + Current ({current_season})")
         print(f"{'='*70}")
 
         # Load historical seasons (2022, 2023, 2024)
@@ -146,11 +163,19 @@ class ModelTrainer:
 
         return backtest_results
 
-    def train_final_models(self, through_week: int = 8):
+    def train_final_models(self, through_week: int = None):
         """
         Train final models on all available data through specified week.
         This is run after backtesting to create production models.
+
+        FIXED: Auto-detect latest week if through_week is None
         """
+        # FIXED: Auto-detect if not specified
+        if through_week is None:
+            current_season = get_current_season()
+            through_week = get_latest_completed_week(current_season)
+            print(f"📊 Auto-detected latest completed week: {through_week}")
+
         print("\n" + "="*70)
         print(f"TRAINING FINAL MODELS (through Week {through_week})")
         print("="*70)
@@ -363,20 +388,29 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train NFL Props Models')
     parser.add_argument('--backtest', action='store_true', help='Run time-series backtest')
     parser.add_argument('--train', action='store_true', help='Train final models')
-    parser.add_argument('--through-week', type=int, default=8, help='Train through this week')
+    # FIXED: Default to None for auto-detection
+    parser.add_argument('--through-week', type=int, default=None, help='Train through this week (default: auto-detect)')
 
     args = parser.parse_args()
 
     trainer = ModelTrainer()
 
+    # FIXED: Use dynamic detection
+    through_week = args.through_week
+    if through_week is None:
+        current_season = get_current_season()
+        through_week = get_latest_completed_week(current_season)
+        print(f"\n📊 Auto-detected season {current_season}, week {through_week}")
+
     if args.backtest:
-        trainer.run_backtest(through_week=args.through_week)
+        trainer.run_backtest(through_week=through_week)
 
     if args.train:
-        trainer.train_final_models(through_week=args.through_week)
+        trainer.train_final_models(through_week=through_week)
 
     if not args.backtest and not args.train:
         # Default: do both
         print("Running backtest and training...")
-        trainer.run_backtest(through_week=args.through_week - 1)
-        trainer.train_final_models(through_week=args.through_week)
+        print(f"Using through week: {through_week}")
+        trainer.run_backtest(through_week=through_week - 1 if through_week > 1 else through_week)
+        trainer.train_final_models(through_week=through_week)

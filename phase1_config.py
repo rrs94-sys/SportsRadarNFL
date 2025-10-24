@@ -1,10 +1,24 @@
 """
 Configuration for NFL Player Props Prediction System
 Version 2.0 - Market-Optimized with Enhancements
+
+FIXED: Added dynamic season detection imports and utilities
 """
 
 import os
 from typing import Dict, List
+from datetime import datetime
+
+# FIXED: Import dynamic season detection utilities
+def _get_current_season() -> int:
+    """Dynamic season detection (year if month >= 9, else year - 1)"""
+    today = datetime.today()
+    return today.year if today.month >= 9 else today.year - 1
+
+def _get_historical_seasons(lookback: int = 3) -> List[int]:
+    """Generate historical seasons list dynamically"""
+    current = _get_current_season()
+    return list(range(current - lookback, current))
 
 
 class Config:
@@ -50,8 +64,10 @@ class Config:
     # ========================================================================
     # DATA SETTINGS
     # ========================================================================
-    HISTORICAL_SEASONS = [2022, 2023, 2024]  # Last 3 full seasons
-    CURRENT_SEASON = 2025  # Current 2025 season (updates weekly)
+    # FIXED: Use dynamic season detection instead of hardcoded values
+    CURRENT_SEASON = _get_current_season()  # Dynamically detected
+    HISTORICAL_SEASONS = _get_historical_seasons(3)  # Last 3 full seasons (dynamically generated)
+
     CACHE_DIR = "data_cache"
     MODEL_DIR = "saved_models_v2"
     LINES_CACHE_DIR = "lines_cache"  # Historical lines for edge tracking

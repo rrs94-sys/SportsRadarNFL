@@ -1,6 +1,9 @@
 """
 Main Prediction Pipeline with Monte Carlo Simulation and Edge@k
 Generates actionable betting recommendations
+
+FIXED: Corrected imports (RecencyDataIngestion doesn't exist)
+FIXED: Added dynamic season detection
 """
 
 import pandas as pd
@@ -11,7 +14,9 @@ from datetime import datetime
 from typing import Dict, List
 
 from phase1_config import Config
-from phase1_ingestion import RecencyDataIngestion
+# FIXED: Import correct classes
+from phase1_ingestion import HistoricalDataIngestion
+from load_2025_data import CurrentSeasonLoader
 from phase1_features import Phase1FeatureEngineer
 from market_optimized_models import MarketOptimizedModel, TDProbabilityModel
 from tank_injury_client import TankInjuryClient
@@ -19,6 +24,9 @@ from weather_client import WeatherClient
 from sportsgameodds_client import SportsGameOddsClient
 from monte_carlo_engine import MonteCarloEngine
 from quantitative_betting_engine import QuantitativeBettingEngine
+
+# FIXED: Import dynamic detection utilities
+from nfl_data_utils import get_current_season, get_latest_completed_week
 
 
 class PropPredictor:
@@ -36,7 +44,9 @@ class PropPredictor:
 
     def __init__(self, config: Config = Config):
         self.config = config
-        self.ingestion = RecencyDataIngestion(config)
+        # FIXED: Use CurrentSeasonLoader instead of RecencyDataIngestion
+        self.current_loader = CurrentSeasonLoader(config)
+        self.historical_loader = HistoricalDataIngestion(config)
         self.injury_client = TankInjuryClient(config)
         self.weather_client = WeatherClient(config)
         self.sgo_client = SportsGameOddsClient(config)
@@ -80,15 +90,19 @@ class PropPredictor:
         """
         Generate predictions for a specific week.
 
+        FIXED: Added dynamic season detection
+        FIXED: Use CurrentSeasonLoader for data loading
+
         Args:
             week: Week to predict
-            season: Season (default: current from config)
+            season: Season (default: auto-detect current)
 
         Returns:
             DataFrame with predictions and recommendations
         """
+        # FIXED: Dynamic season detection
         if season is None:
-            season = self.config.CURRENT_SEASON
+            season = get_current_season()
 
         print("\n" + "="*70)
         print(f"PREDICTING WEEK {week}, {season}")
@@ -96,7 +110,8 @@ class PropPredictor:
 
         # Step 1: Load data through previous week
         print(f"\n1. Loading data through Week {week-1}...")
-        data = self.ingestion.load_all_data(through_week=week-1)
+        # FIXED: Use CurrentSeasonLoader
+        data = self.current_loader.load_2025_data(through_week=week-1)
 
         # Step 2: Load external data
         print("\n2. Loading external data...")
@@ -121,7 +136,15 @@ class PropPredictor:
 
         # Step 5: Get active roster
         print("\n5. Getting active roster...")
-        roster = self.ingestion.get_active_roster(data, weeks=[week-3, week-2, week-1])
+        # FIXED: Generate active roster from player_weeks data
+        player_weeks = data['player_weeks']
+        recent_weeks = [week-3, week-2, week-1]
+        recent_weeks = [w for w in recent_weeks if w > 0]  # Filter out negative weeks
+
+        roster = player_weeks[
+            player_weeks['week'].isin(recent_weeks)
+        ].groupby(['player_id', 'player_name', 'team', 'position']).size().reset_index()
+        roster = roster.drop(columns=[0])  # Remove count column
         print(f"  Found {len(roster)} active players")
 
         # Step 6: Generate predictions
@@ -369,10 +392,23 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description='Predict NFL Props')
-    parser.add_argument('--week', type=int, required=True, help='Week to predict')
-    parser.add_argument('--season', type=int, default=None, help='Season (default: current)')
+    parser.add_argument('--week', type=int, required=False, default=None, help='Week to predict (default: next week)')
+    parser.add_argument('--season', type=int, default=None, help='Season (default: auto-detect current)')
 
     args = parser.parse_args()
+
+    # FIXED: Auto-detect week and season if not provided
+    season = args.season
+    if season is None:
+        season = get_current_season()
+        print(f"📊 Auto-detected season: {season}")
+
+    week = args.week
+    if week is None:
+        latest_week = get_latest_completed_week(season)
+        week = latest_week + 1  # Predict next week
+        print(f"📊 Auto-detected latest completed week: {latest_week}")
+        print(f"📊 Predicting for week: {week}")
 
     predictor = PropPredictor()
 
@@ -380,6 +416,6 @@ if __name__ == "__main__":
     predictor.load_models()
 
     # Generate predictions
-    predictions = predictor.predict_week(args.week, args.season)
+    predictions = predictor.predict_week(week, season)
 
     print("\n✅ Prediction pipeline complete!")

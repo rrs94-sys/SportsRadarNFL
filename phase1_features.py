@@ -880,14 +880,16 @@ class Phase1FeatureEngineer:
 
 if __name__ == "__main__":
     # Test feature engineering
-    from phase1_ingestion import RecencyDataIngestion
+    # FIXED: Import correct classes
+    from load_2025_data import CurrentSeasonLoader
 
     print("\n" + "="*60)
     print("TESTING FEATURE ENGINEERING")
     print("="*60)
 
-    ingestion = RecencyDataIngestion()
-    data = ingestion.load_all_data(through_week=7)
+    # FIXED: Use CurrentSeasonLoader
+    loader = CurrentSeasonLoader()
+    data = loader.load_2025_data(through_week=None)  # Auto-detect
 
     engineer = Phase1FeatureEngineer(data)
 
