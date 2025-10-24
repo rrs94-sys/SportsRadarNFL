@@ -27,23 +27,69 @@ from typing import List, Dict, Tuple, Optional
 
 def get_current_season() -> int:
     """
-    Dynamically detect current NFL season.
+    Dynamically detect current NFL season with data availability check.
 
     FIXED: Implements dynamic season detection per requirements:
     - If current month >= September (9), use current year
     - Otherwise, use previous year
+    - Verifies data exists, falls back to most recent available season
 
     Returns:
-        Current NFL season year
+        Current NFL season year (verified to have data available)
     """
     today = datetime.today()
     current_year = today.year
     current_month = today.month
 
     # NFL season starts in September
-    season = current_year if current_month >= 9 else current_year - 1
+    detected_season = current_year if current_month >= 9 else current_year - 1
 
-    return season
+    # FIXED: Verify data exists for detected season, fall back if needed
+    available_season = _verify_season_data_exists(detected_season)
+
+    if available_season != detected_season:
+        print(f"⚠️  {detected_season} data not available yet, using {available_season}")
+
+    return available_season
+
+
+def _verify_season_data_exists(season: int) -> int:
+    """
+    Verify that data exists for a given season, fall back to most recent if not.
+
+    FIXED: Core fix for 404 errors - checks data availability before fetching
+
+    Args:
+        season: Proposed season to check
+
+    Returns:
+        Season that actually has data available
+    """
+    import nfl_data_py as nfl
+
+    # Try to load a minimal schedule to verify data exists
+    max_attempts = 5
+    for attempt in range(max_attempts):
+        try_season = season - attempt
+        if try_season < 1999:  # nfl_data_py starts at 1999
+            break
+
+        try:
+            # Quick check - try to load schedule (lightweight)
+            schedule = nfl.import_schedules([try_season])
+            if not schedule.empty:
+                return try_season
+        except Exception as e:
+            # Data doesn't exist for this season, try previous year
+            if attempt < max_attempts - 1:
+                continue
+            else:
+                # Default to 2024 as last resort
+                print(f"⚠️  Could not verify any season data, defaulting to 2024")
+                return 2024
+
+    # If all else fails, return 2024
+    return 2024
 
 
 def get_completed_weeks(season: int) -> List[int]:
@@ -51,6 +97,7 @@ def get_completed_weeks(season: int) -> List[int]:
     Dynamically fetch completed weeks for a given season.
 
     FIXED: Implements dynamic week detection using game_finished flag from schedules
+    FIXED: Better error handling for data availability issues
 
     Args:
         season: NFL season year
@@ -58,36 +105,47 @@ def get_completed_weeks(season: int) -> List[int]:
     Returns:
         List of completed week numbers
     """
+    import nfl_data_py as nfl
+
     try:
-        # Fetch current season schedule
+        # Fetch season schedule
         schedule = nfl.import_schedules([season])
 
-        # Filter for completed regular season games
-        completed_games = schedule[
-            (schedule['game_finished'] == True) |
-            (schedule['game_type'] == 'REG')
-        ]
+        if schedule.empty:
+            print(f"  ⚠️  No schedule data for {season}, using default weeks")
+            return list(range(1, 18))  # Return all regular season weeks
 
         # Get unique completed weeks
         if 'game_finished' in schedule.columns:
+            # Filter for actually finished games
             completed_weeks = schedule.loc[schedule['game_finished'] == True, 'week'].unique()
-        else:
-            # Fallback: use current week minus 1
-            print("  ⚠️  'game_finished' column not found, using date-based detection")
+        elif 'gameday' in schedule.columns:
+            # Fallback: use games in the past
             today = datetime.today()
-            # Estimate week based on date (rough approximation)
+            past_games = schedule[pd.to_datetime(schedule['gameday']) < pd.Timestamp(today)]
+            completed_weeks = past_games['week'].unique()
+        else:
+            # Last resort: estimate based on current date
+            print("  ⚠️  Limited schedule data, using date-based estimation")
+            today = datetime.today()
             season_start = datetime(season, 9, 1)
-            weeks_elapsed = (today - season_start).days // 7
-            completed_weeks = list(range(1, min(weeks_elapsed, 18)))
+            weeks_elapsed = max(1, (today - season_start).days // 7)
+            completed_weeks = list(range(1, min(weeks_elapsed, 19)))
 
-        completed_weeks = sorted([int(w) for w in completed_weeks if w > 0])
+        completed_weeks = sorted([int(w) for w in completed_weeks if w > 0 and w <= 18])
 
         return completed_weeks if completed_weeks else [1]
 
     except Exception as e:
-        print(f"  ⚠️  Error detecting completed weeks: {e}")
-        # Fallback to week 1
-        return [1]
+        print(f"  ⚠️  Error detecting completed weeks for {season}: {e}")
+        # Return reasonable default based on current date
+        today = datetime.today()
+        if today.month >= 9:  # September or later
+            # Estimate weeks into season
+            weeks = max(1, (today.month - 9) * 4 + today.day // 7)
+            return list(range(1, min(weeks + 1, 19)))
+        else:  # Before September - previous season
+            return list(range(1, 19))  # All weeks from previous season
 
 
 def get_latest_completed_week(season: int) -> int:
@@ -312,6 +370,7 @@ def load_nfl_data(
     Load NFL data for specified seasons and weeks.
 
     FIXED: Unified data loading function with caching and error handling
+    FIXED: Handles 404 errors by filtering unavailable seasons
 
     Args:
         seasons: List of NFL seasons to load
@@ -322,6 +381,8 @@ def load_nfl_data(
     Returns:
         Dictionary with 'schedules', 'team_schedules', 'player_weeks'
     """
+    import nfl_data_py as nfl
+
     os.makedirs(cache_dir, exist_ok=True)
 
     # Create cache key
@@ -340,19 +401,38 @@ def load_nfl_data(
 
     print(f"   📥 Fetching from nfl_data_py...")
 
+    # FIXED: Verify each season exists before loading
+    available_seasons = []
+    for season in seasons:
+        try:
+            # Quick check - try schedule first (lightweight)
+            test_schedule = nfl.import_schedules([season])
+            if not test_schedule.empty:
+                available_seasons.append(season)
+        except Exception:
+            print(f"      ⚠️  Season {season} data not available, skipping")
+            continue
+
+    if not available_seasons:
+        raise ValueError(f"No data available for any of the requested seasons: {seasons}")
+
+    if len(available_seasons) < len(seasons):
+        print(f"      ℹ️  Using available seasons: {available_seasons}")
+
     try:
         # Load weekly player stats
-        print(f"      [1/3] Loading player data for {seasons}...")
+        print(f"      [1/3] Loading player data for {available_seasons}...")
+        player_weeks = nfl.import_weekly_data(available_seasons, columns=None)
+
         if weeks:
-            player_weeks = nfl.import_weekly_data(seasons, columns=None)
             player_weeks = player_weeks[player_weeks['week'].isin(weeks)].copy()
-        else:
-            player_weeks = nfl.import_weekly_data(seasons, columns=None)
+
         print(f"            ✓ {len(player_weeks)} player-weeks")
 
         # Load schedules
         print(f"      [2/3] Loading schedules...")
-        schedules = nfl.import_schedules(seasons)
+        schedules = nfl.import_schedules(available_seasons)
+
         if weeks:
             schedules = schedules[schedules['week'].isin(weeks)].copy()
 
@@ -387,6 +467,7 @@ def load_nfl_data(
 
     except Exception as e:
         print(f"\n   ❌ Error loading NFL data: {e}")
+        print(f"   ℹ️  Attempted seasons: {available_seasons}")
         import traceback
         traceback.print_exc()
         raise
