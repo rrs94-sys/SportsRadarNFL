@@ -18,9 +18,9 @@ A comprehensive, production-ready NFL player props prediction system that combin
 - ✅ **API Call Optimization**: Intelligent caching to respect rate limits
 
 ### Data Sources
-- **nfl-data-py**: Play-by-play, rosters, schedules (last 3 seasons + current)
+- **nflreadpy**: Play-by-play, player stats, schedules (2020-2024 + 2025) - single normalized API
 - **SportsGameOdds**: Real-time betting lines with historical tracking
-- **Tank API**: Live injury reports and player status
+- **Tank API**: Live injury reports (2025) + historical injuries (2020-2024)
 - **Open-Meteo**: Game-day weather forecasts
 
 ### Advanced Features
@@ -82,7 +82,9 @@ python train_models.py --train --through-week 8     # Train final models
 ```
 
 **What happens:**
-- Loads data from last 3 seasons + 2025 (30% historical, 70% recent)
+- Loads data from 2020-2024 (full seasons) + 2025 (current)
+- Applies 30/70 weighting (30% historical 2020-2024, 70% current 2025)
+- Includes play-by-play data and injury data
 - Runs time-series backtest:
   - Train 1-4, validate 5-6
   - Train 1-5, validate 6-7
@@ -134,18 +136,22 @@ python predict_props.py --week 10 --season 2025
 ```
 Data Layer → Feature Engineering → Model Training → Prediction → Monte Carlo → Betting Engine
      ↓              ↓                    ↓              ↓            ↓             ↓
-  nfl_data_py   70+ features      XGB/LGB Quantile  Edge@k     10k sims      Kelly + Corr
-  SportsGameOdds  Recency         Position-specific  CLV                      Controls
-  Tank (Injuries) Volatility      GroupKFold CV      ROI
-  Open-Meteo      Usage           Isotonic Calib
+  nflreadpy     70+ features      XGB/LGB Quantile  Edge@k     10k sims      Kelly + Corr
+  (2020-2025)   Recency 30/70     Position-specific  CLV                      Controls
+  Injury Map    Volatility        GroupKFold CV      ROI
+  PBP Data      Usage             Isotonic Calib
+  Weather       Trends
 ```
 
 ### Key Components
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| **Data Ingestion** | `phase1_ingestion.py` | Loads/caches NFL data with 30/70 weighting |
+| **Data Loading** | `nfl_data_utils.py` | Unified data loader (nflreadpy, 2020-2025, 30/70 weighting) |
+| **Injury Mapping** | `injury_data_mapper.py` | TANK01 + nflreadpy injury integration |
+| **Data Ingestion** | `phase1_ingestion.py` | Orchestrates data loading and caching |
 | **Feature Engineering** | `phase1_features.py` | 70+ features per player |
+| **Recency Weighting** | `recency_phase1_enhanced.py` | Advanced recency and volatility features |
 | **Models** | `market_optimized_models.py` | Quantile regression with calibration |
 | **Loss Functions** | `custom_loss_functions.py` | Quantile, Poisson, NegBin, LogNormal, Huber |
 | **Monte Carlo** | `monte_carlo_engine.py` | 10k simulations per prop |
@@ -153,6 +159,7 @@ Data Layer → Feature Engineering → Model Training → Prediction → Monte C
 | **Evaluation** | `calibration_evaluation.py` | CLV, ROI, edge@k, Brier, LogLoss |
 | **Training** | `train_models.py` | Time-series backtest + training |
 | **Prediction** | `predict_props.py` | Full pipeline orchestration |
+| **External APIs** | `sportsgameodds_client.py`, `tank_injury_client.py`, `weather_client.py` | Data sources |
 
 ---
 
@@ -285,27 +292,41 @@ print(f"API calls: {usage['calls_used']}/{usage['monthly_limit']}")
 
 ```
 NFLModel/
-├── phase1_config.py              # Configuration (API keys, parameters)
-├── phase1_ingestion.py           # Data loading & caching
-├── phase1_features.py            # Feature engineering (70+ features)
-├── market_optimized_models.py    # Quantile models + calibration
-├── custom_loss_functions.py      # Loss functions
-├── monte_carlo_engine.py         # 10k simulations
-├── quantitative_betting_engine.py # Kelly sizing + correlation
-├── calibration_evaluation.py     # CLV, ROI, edge@k metrics
-├── sportsgameodds_client.py      # Lines API with caching
-├── tank_injury_client.py         # Injury data
-├── weather_client.py             # Weather forecasts
-├── train_models.py               # Training pipeline
-├── predict_props.py              # Prediction pipeline
-├── requirements.txt              # Dependencies
-├── README.md                     # This file
-├── COMPLETE_SYSTEM_EXPORT.md     # Technical documentation
+├── Core Data Layer
+│   ├── nfl_data_utils.py              # Unified data loader (nflreadpy 2020-2025)
+│   ├── injury_data_mapper.py          # TANK01 + nflreadpy injury integration
+│   ├── phase1_ingestion.py            # Data orchestration & caching
+│   └── phase1_config.py               # Configuration (API keys, parameters)
 │
-├── data_cache/                   # Cached NFL data
-├── lines_cache/                  # Cached betting lines
-├── saved_models_v2/              # Trained models
-└── week*_predictions_*.csv       # Output files
+├── Feature Engineering
+│   ├── phase1_features.py             # 70+ features per player
+│   └── recency_phase1_enhanced.py     # Recency weighting & volatility
+│
+├── Models & Training
+│   ├── market_optimized_models.py     # Quantile models + calibration
+│   ├── custom_loss_functions.py       # Loss functions
+│   ├── calibration_evaluation.py      # CLV, ROI, edge@k metrics
+│   └── train_models.py                # Training pipeline
+│
+├── Prediction & Betting
+│   ├── predict_props.py               # Prediction pipeline
+│   ├── monte_carlo_engine.py          # 10k simulations
+│   └── quantitative_betting_engine.py # Kelly sizing + correlation
+│
+├── External APIs
+│   ├── sportsgameodds_client.py       # Lines API with caching
+│   ├── tank_injury_client.py          # Injury data (TANK01)
+│   └── weather_client.py              # Weather forecasts
+│
+├── Configuration
+│   ├── requirements.txt               # Dependencies
+│   └── README.md                      # This file
+│
+└── Data & Output
+    ├── data_cache/                    # Cached NFL data
+    ├── lines_cache/                   # Cached betting lines
+    ├── saved_models_v2/               # Trained models
+    └── week*_predictions_*.csv        # Output files
 ```
 
 ---
@@ -419,6 +440,22 @@ This system is for **research and educational purposes only**. Sports betting in
 
 ---
 
-**Version:** 2.0 (Market-Optimized)
+## Production Branch
+
+This is the **clean production branch** with only essential files:
+- ✅ No test files
+- ✅ No obsolete TANK01 clients (using nflreadpy instead)
+- ✅ No migration documentation
+- ✅ Streamlined for production deployment
+
+**Data Range:** 2020-2024 (full seasons) + 2025 (current)
+**Weighting:** 30% historical, 70% current
+**Data Source:** nflreadpy (unified API)
+**Injury Data:** TANK01 (2025) + nflreadpy (2020-2024)
+
+---
+
+**Version:** 2.0 (Market-Optimized, Clean Production)
 **Last Updated:** October 2025
+**Branch:** `claude/production-clean-011CUSB3zfhR443xAurdizHU`
 **Status:** Production-Ready ✅
