@@ -1,28 +1,29 @@
 """
-NFL Data Utilities - Unified Data Loading Module with TANK01 Integration
-=========================================================================
+NFL Data Utilities - Unified Data Loading Module with nflreadpy
+================================================================
 FIXED: Created unified module to eliminate code duplication and enable dynamic season/week detection
 FIXED: Implements dynamic season and week detection per requirements
-FIXED: Seamless integration of TANK01 API for 2025 season data
-FIXED: Hybrid data loading: nflreadpy (historical) + TANK01 (2025)
 FIXED: Migration from nfl_data_py (deprecated) to nflreadpy for 2025 support
+FIXED: Normalized to single API source (nflreadpy) for all seasons (1999-2025)
+FIXED: Added play-by-play (PBP) data loading for enhanced feature engineering
 
 This module provides:
 - Dynamic season detection (current year if month >= 9, else year - 1)
 - Dynamic week detection (fetches completed weeks from schedule)
-- Automatic source selection: nflreadpy (≤2024) or TANK01 (2025)
-- Perfect data alignment and merging between sources
+- Single normalized data source: nflreadpy (1999-2025)
+- Play-by-play (PBP) data loading for detailed analysis
+- 30/70 weighting model (30% historical, 70% recent)
 - Unified data loading functions
 - Shared utilities for schedule and player data processing
 - Compatibility shim for nfl_data_py → nflreadpy migration
 
 DATA SOURCE STRATEGY:
-- Historical (1999-2024): nflreadpy (drop-in replacement for nfl_data_py)
-- Current Season (2025): TANK01 API
-- Automatic detection and seamless merging
+- All Seasons (1999-2025): nflreadpy (Polars-first with pandas conversion)
+- Default lookback: 5 full seasons for historical data
+- 30/70 weighting: 30% weight on historical, 70% weight on current season
 
 NOTE: nfl_data_py was deprecated in Sep 2025. This module now uses nflreadpy
-      (Polars-first, with automatic pandas conversion) for all historical data.
+      (Polars-first, with automatic pandas conversion) for all data.
 """
 
 import os
@@ -128,6 +129,32 @@ def import_injuries_safe(seasons: Union[int, Iterable[int], bool, None]) -> pd.D
     return df
 
 
+def import_pbp_data(seasons: Union[int, Iterable[int], bool, None]) -> pd.DataFrame:
+    """
+    Load play-by-play (PBP) data from nflreadpy.
+
+    FIXED: Added PBP data loading for enhanced feature engineering
+
+    Args:
+        seasons: Season(s) to load - int, list of ints, True for all, or None for all
+
+    Returns:
+        pandas DataFrame with play-by-play data
+    """
+    yrs = _to_year_list(seasons)
+    print(f"   📊 Loading PBP data for seasons: {yrs if yrs != True else 'all available'}...")
+
+    try:
+        # nflreadpy returns Polars DataFrame; convert to pandas for compatibility
+        df_pl = nfl_new.load_pbp(yrs)
+        df = df_pl.to_pandas()
+        print(f"      ✓ Loaded {len(df):,} plays")
+        return df
+    except Exception as e:
+        print(f"      ⚠️  PBP data unavailable: {e}. Returning empty DataFrame.")
+        return pd.DataFrame()
+
+
 # Legacy compatibility: expose as 'nfl' module for backwards compatibility
 class _NFLDataShim:
     """Compatibility shim to mimic nfl_data_py module interface"""
@@ -135,6 +162,7 @@ class _NFLDataShim:
     import_schedules = staticmethod(import_schedules)
     import_team_desc = staticmethod(import_team_desc)
     import_injuries = staticmethod(import_injuries_safe)
+    import_pbp_data = staticmethod(import_pbp_data)
 
 nfl = _NFLDataShim()
 
@@ -281,15 +309,16 @@ def get_latest_completed_week(season: int) -> int:
     return max(completed_weeks) if completed_weeks else 1
 
 
-def get_historical_seasons(current_season: int, lookback_years: int = 3) -> List[int]:
+def get_historical_seasons(current_season: int, lookback_years: int = 5) -> List[int]:
     """
     Get historical seasons for training (excludes current season).
 
     FIXED: Dynamic historical season generation
+    FIXED: Default changed to 5 years for enhanced training data
 
     Args:
         current_season: Current NFL season
-        lookback_years: Number of years to look back (default 3)
+        lookback_years: Number of years to look back (default 5)
 
     Returns:
         List of historical season years
@@ -590,62 +619,6 @@ def load_nfl_data(
         raise
 
 
-def _load_from_tank01(
-    seasons: List[int],
-    through_week: int,
-    cache_dir: str,
-    force_refresh: bool
-) -> Dict[str, pd.DataFrame]:
-    """
-    Load data from TANK01 API for 2025 season.
-
-    FIXED: Seamless integration of TANK01 as data source
-    FIXED: Now uses production-grade robust client with retry/fallback/caching
-
-    Args:
-        seasons: List of seasons (should be [2025])
-        through_week: Last week to load
-        cache_dir: Cache directory
-        force_refresh: Force refresh flag (not currently used by robust client)
-
-    Returns:
-        Dictionary matching nfl_data_py structure
-    """
-    from tank01_client_robust import load_2025_season
-
-    print("   📥 Fetching from TANK01 API (PRODUCTION-GRADE CLIENT)...")
-    print("   ✓ Retry logic: Exponential backoff for 504/503/502/500/429")
-    print("   ✓ Host failover: Primary → RapidFire mirror if needed")
-    print("   ✓ Fallback: Disk cache → Sample files")
-    print("   ✓ Week guard: Only completed weeks")
-
-    # Use robust client to load 2025 data
-    player_weeks = load_2025_season(up_to_week=through_week)
-
-    # Create placeholder schedules (robust client focuses on player stats)
-    # In production, you'd also implement robust schedule loading
-    schedules = pd.DataFrame()
-    team_schedules = pd.DataFrame()
-
-    # If player_weeks has game_id, we can infer some schedule info
-    if not player_weeks.empty and 'game_id' in player_weeks.columns:
-        # Create minimal schedule from player data
-        schedule_data = player_weeks[['game_id', 'week', 'season']].drop_duplicates()
-        schedules = schedule_data
-
-        if not schedules.empty:
-            team_schedules = create_team_schedules(schedules)
-
-    # Package data
-    data = {
-        'schedules': schedules,
-        'team_schedules': team_schedules,
-        'player_weeks': player_weeks
-    }
-
-    return data
-
-
 def load_current_season_data(
     through_week: Optional[int] = None,
     cache_dir: str = "data_cache",
@@ -655,8 +628,7 @@ def load_current_season_data(
     Load current season data with dynamic season and week detection.
 
     FIXED: Implements dynamic detection per requirements
-    FIXED: Automatically uses TANK01 for 2025, nfl_data_py for ≤2024
-    FIXED: Graceful fallback to nfl_data_py if TANK01 unavailable
+    FIXED: Normalized to single API source (nflreadpy) for all seasons
 
     Args:
         through_week: Last completed week to load (None = auto-detect)
@@ -678,33 +650,10 @@ def load_current_season_data(
     print(f"LOADING CURRENT SEASON DATA ({season}, Weeks 1-{through_week})")
     print(f"{'='*70}")
 
-    # FIXED: Use TANK01 for 2025, nfl_data_py for ≤2024
-    # FIXED: Gracefully fall back to nfl_data_py if TANK01 fails
-    if season >= 2025:
-        print(f"   📊 Attempting data source: TANK01 API")
-        try:
-            from tank01_stats_client import Tank01APIAccessError
-            data = _load_from_tank01([season], through_week, cache_dir, force_refresh)
-        except Tank01APIAccessError as e:
-            print(f"\n⚠️  TANK01 API UNAVAILABLE")
-            print(f"   {str(e)}")
-            print(f"\n   🔄 Falling back to nfl_data_py for season {season}")
-            print(f"   Note: Data may not be available or may be incomplete.")
-            weeks = list(range(1, through_week + 1))
-            try:
-                data = load_nfl_data([season], weeks=weeks, cache_dir=cache_dir, force_refresh=force_refresh)
-            except Exception as fallback_error:
-                print(f"\n❌ ERROR: Neither TANK01 nor nfl_data_py have data for {season}")
-                print(f"   TANK01 error: API access denied")
-                print(f"   nfl_data_py error: {str(fallback_error)}")
-                raise ValueError(
-                    f"No data source available for {season} season. "
-                    f"TANK01 API key may need renewal, and nfl_data_py doesn't have {season} data yet."
-                )
-    else:
-        print(f"   📊 Data source: nfl_data_py")
-        weeks = list(range(1, through_week + 1))
-        data = load_nfl_data([season], weeks=weeks, cache_dir=cache_dir, force_refresh=force_refresh)
+    # FIXED: Use nflreadpy for all seasons (1999-2025)
+    print(f"   📊 Data source: nflreadpy (unified API)")
+    weeks = list(range(1, through_week + 1))
+    data = load_nfl_data([season], weeks=weeks, cache_dir=cache_dir, force_refresh=force_refresh)
 
     print(f"\n✅ Current season data loaded: {len(data['player_weeks'])} player-weeks")
 
@@ -712,7 +661,7 @@ def load_current_season_data(
 
 
 def load_historical_data(
-    lookback_years: int = 3,
+    lookback_years: int = 5,
     cache_dir: str = "data_cache",
     force_refresh: bool = False
 ) -> Dict[str, pd.DataFrame]:
@@ -720,9 +669,10 @@ def load_historical_data(
     Load historical data with dynamic season detection.
 
     FIXED: Implements dynamic historical season detection
+    FIXED: Default changed to 5 years for enhanced training data
 
     Args:
-        lookback_years: Number of years to look back (default 3)
+        lookback_years: Number of years to look back (default 5)
         cache_dir: Directory for caching data
         force_refresh: Force re-download, ignore cache
 
@@ -746,32 +696,38 @@ def load_historical_data(
 
 
 def load_hybrid_data(
-    historical_years: int = 3,
+    historical_years: int = 5,
     current_through_week: Optional[int] = None,
     cache_dir: str = "data_cache",
-    force_refresh: bool = False
+    force_refresh: bool = False,
+    include_pbp: bool = True
 ) -> Dict[str, pd.DataFrame]:
     """
-    Load and merge historical data + current season data.
+    Load and merge historical data + current season data with 30/70 weighting.
 
     FIXED: Hybrid loader for training models on combined datasets
-    FIXED: Seamlessly merges nfl_data_py (historical) + TANK01 (2025)
+    FIXED: Normalized to single API source (nflreadpy) for all seasons
+    FIXED: Default changed to 5 years for enhanced training data
+    FIXED: Added 30/70 weighting model (30% historical, 70% current)
+    FIXED: Optional PBP data loading for enhanced feature engineering
 
     Args:
-        historical_years: Number of historical years to include
+        historical_years: Number of historical years to include (default 5)
         current_through_week: Last week of current season (None = auto-detect)
         cache_dir: Cache directory
         force_refresh: Force refresh flag
+        include_pbp: Whether to load play-by-play data (default True)
 
     Returns:
-        Dictionary with merged data from both sources
+        Dictionary with merged data with 30/70 weighting applied
     """
     print("\n" + "="*70)
     print("LOADING HYBRID DATA (Historical + Current Season)")
+    print("30/70 Weighting Model: 30% historical, 70% current")
     print("="*70)
 
     # Load historical data
-    print("\n[1/2] Loading historical data...")
+    print("\n[1/3] Loading historical data...")
     historical = load_historical_data(
         lookback_years=historical_years,
         cache_dir=cache_dir,
@@ -779,15 +735,25 @@ def load_hybrid_data(
     )
 
     # Load current season
-    print("\n[2/2] Loading current season...")
+    print("\n[2/3] Loading current season...")
     current = load_current_season_data(
         through_week=current_through_week,
         cache_dir=cache_dir,
         force_refresh=force_refresh
     )
 
-    # FIXED: Merge datasets with perfect alignment
-    print("\n[3/3] Merging datasets...")
+    # FIXED: Apply 30/70 weighting model
+    print("\n[3/3] Merging datasets with 30/70 weighting...")
+
+    # Add weight column: 0.30 for historical, 0.70 for current
+    historical['player_weeks'] = historical['player_weeks'].copy()
+    current['player_weeks'] = current['player_weeks'].copy()
+
+    historical['player_weeks']['weight'] = 0.30
+    current['player_weeks']['weight'] = 0.70
+
+    print(f"   ✓ Historical weight: 0.30 ({len(historical['player_weeks'])} player-weeks)")
+    print(f"   ✓ Current weight: 0.70 ({len(current['player_weeks'])} player-weeks)")
 
     merged_data = {
         'player_weeks': pd.concat([
@@ -806,13 +772,24 @@ def load_hybrid_data(
         ], ignore_index=True),
     }
 
+    # FIXED: Load PBP data if requested
+    if include_pbp:
+        print("\n[4/4] Loading play-by-play data...")
+        current_season = get_current_season()
+        pbp_seasons = list(range(current_season - historical_years, current_season + 1))
+        merged_data['pbp'] = import_pbp_data(pbp_seasons)
+        print(f"   ✓ PBP data loaded for seasons: {pbp_seasons}")
+    else:
+        merged_data['pbp'] = pd.DataFrame()
+
     # FIXED: Verify merged data consistency
     _verify_hybrid_data_consistency(merged_data, historical, current)
 
     print(f"\n✅ Hybrid data loaded:")
-    print(f"   Historical: {len(historical['player_weeks'])} player-weeks")
-    print(f"   Current:    {len(current['player_weeks'])} player-weeks")
+    print(f"   Historical: {len(historical['player_weeks'])} player-weeks (weight: 0.30)")
+    print(f"   Current:    {len(current['player_weeks'])} player-weeks (weight: 0.70)")
     print(f"   Total:      {len(merged_data['player_weeks'])} player-weeks")
+    print(f"   PBP plays:  {len(merged_data['pbp']):,}")
     print(f"   Seasons:    {sorted(merged_data['player_weeks']['season'].unique())}")
 
     return merged_data
