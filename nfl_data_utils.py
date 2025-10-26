@@ -700,34 +700,46 @@ def load_hybrid_data(
     current_through_week: Optional[int] = None,
     cache_dir: str = "data_cache",
     force_refresh: bool = False,
-    include_pbp: bool = True
+    include_pbp: bool = True,
+    include_injuries: bool = True,
+    force_current_season: Optional[int] = None
 ) -> Dict[str, pd.DataFrame]:
     """
     Load and merge historical data + current season data with 30/70 weighting.
 
     FIXED: Hybrid loader for training models on combined datasets
     FIXED: Normalized to single API source (nflreadpy) for all seasons
-    FIXED: Default changed to 5 years for enhanced training data
+    FIXED: Default changed to 5 years for enhanced training data (2020-2024 + 2025)
     FIXED: Added 30/70 weighting model (30% historical, 70% current)
     FIXED: Optional PBP data loading for enhanced feature engineering
+    FIXED: Integrated injury data from TANK01 (2025) and nflreadpy (2020-2024)
 
     Args:
-        historical_years: Number of historical years to include (default 5)
+        historical_years: Number of historical years to include (default 5 = 2020-2024)
         current_through_week: Last week of current season (None = auto-detect)
         cache_dir: Cache directory
         force_refresh: Force refresh flag
         include_pbp: Whether to load play-by-play data (default True)
+        include_injuries: Whether to load injury data (default True)
+        force_current_season: Override current season (e.g., 2025 for explicit testing)
 
     Returns:
         Dictionary with merged data with 30/70 weighting applied
+        Includes: player_weeks, schedules, team_schedules, pbp, injuries
     """
     print("\n" + "="*70)
     print("LOADING HYBRID DATA (Historical + Current Season)")
     print("30/70 Weighting Model: 30% historical, 70% current")
+    if force_current_season:
+        print(f"Forced Current Season: {force_current_season}")
+        print(f"Historical Range: {force_current_season - historical_years}-{force_current_season - 1}")
     print("="*70)
 
+    # Determine current season (allow override for 2025 explicit usage)
+    current_season = force_current_season if force_current_season else get_current_season()
+
     # Load historical data
-    print("\n[1/3] Loading historical data...")
+    print(f"\n[1/4] Loading historical data...")
     historical = load_historical_data(
         lookback_years=historical_years,
         cache_dir=cache_dir,
@@ -735,7 +747,7 @@ def load_hybrid_data(
     )
 
     # Load current season
-    print("\n[2/3] Loading current season...")
+    print(f"\n[2/4] Loading current season ({current_season})...")
     current = load_current_season_data(
         through_week=current_through_week,
         cache_dir=cache_dir,
@@ -743,7 +755,7 @@ def load_hybrid_data(
     )
 
     # FIXED: Apply 30/70 weighting model
-    print("\n[3/3] Merging datasets with 30/70 weighting...")
+    print("\n[3/4] Merging datasets with 30/70 weighting...")
 
     # Add weight column: 0.30 for historical, 0.70 for current
     historical['player_weeks'] = historical['player_weeks'].copy()
@@ -773,14 +785,52 @@ def load_hybrid_data(
     }
 
     # FIXED: Load PBP data if requested
+    print(f"\n[4/4] Loading additional data...")
     if include_pbp:
-        print("\n[4/4] Loading play-by-play data...")
-        current_season = get_current_season()
+        print("   📊 Loading play-by-play data...")
         pbp_seasons = list(range(current_season - historical_years, current_season + 1))
         merged_data['pbp'] = import_pbp_data(pbp_seasons)
-        print(f"   ✓ PBP data loaded for seasons: {pbp_seasons}")
+        print(f"      ✓ PBP data loaded for seasons: {pbp_seasons}")
     else:
         merged_data['pbp'] = pd.DataFrame()
+
+    # FIXED: Load injury data if requested
+    if include_injuries:
+        print("   🏥 Loading injury data...")
+        try:
+            from injury_data_mapper import InjuryDataMapper
+            injury_mapper = InjuryDataMapper()
+
+            # Load injuries for all seasons
+            all_injuries = []
+            injury_seasons = list(range(current_season - historical_years, current_season + 1))
+
+            for season in injury_seasons:
+                use_tank01 = (season >= 2025)
+                use_historical = (season <= 2024)
+                season_injuries = injury_mapper.get_unified_injuries(
+                    season=season,
+                    use_tank01=use_tank01,
+                    use_historical=use_historical
+                )
+                if not season_injuries.empty:
+                    all_injuries.append(season_injuries)
+
+            if all_injuries:
+                merged_data['injuries'] = pd.concat(all_injuries, ignore_index=True)
+                print(f"      ✓ Injury data loaded: {len(merged_data['injuries'])} player injuries")
+            else:
+                merged_data['injuries'] = pd.DataFrame()
+                print(f"      ⚠️  No injury data available")
+
+        except ImportError as e:
+            print(f"      ⚠️  Injury mapper not available: {e}")
+            merged_data['injuries'] = pd.DataFrame()
+        except Exception as e:
+            print(f"      ⚠️  Error loading injuries: {e}")
+            merged_data['injuries'] = pd.DataFrame()
+    else:
+        merged_data['injuries'] = pd.DataFrame()
 
     # FIXED: Verify merged data consistency
     _verify_hybrid_data_consistency(merged_data, historical, current)
@@ -790,6 +840,7 @@ def load_hybrid_data(
     print(f"   Current:    {len(current['player_weeks'])} player-weeks (weight: 0.70)")
     print(f"   Total:      {len(merged_data['player_weeks'])} player-weeks")
     print(f"   PBP plays:  {len(merged_data['pbp']):,}")
+    print(f"   Injuries:   {len(merged_data['injuries'])} player injuries")
     print(f"   Seasons:    {sorted(merged_data['player_weeks']['season'].unique())}")
 
     return merged_data
@@ -849,6 +900,51 @@ def _verify_hybrid_data_consistency(
             assert hist_dtype == curr_dtype, f"Data type mismatch for column '{col}': {hist_dtype} vs {curr_dtype}"
 
     print("   ✓ Hybrid data consistency validation passed")
+
+
+def load_2020_2025_data(
+    current_through_week: Optional[int] = None,
+    cache_dir: str = "data_cache",
+    force_refresh: bool = False,
+    include_pbp: bool = True,
+    include_injuries: bool = True
+) -> Dict[str, pd.DataFrame]:
+    """
+    Convenience function to explicitly load 2020-2024 (full) + 2025 (current) data.
+
+    FIXED: Explicit 2020-2024 + 2025 loading per user requirements
+    FIXED: Uses 30/70 weighting model
+    FIXED: Includes PBP and injury data
+
+    Args:
+        current_through_week: Last week of 2025 season (None = auto-detect)
+        cache_dir: Cache directory
+        force_refresh: Force refresh flag
+        include_pbp: Whether to load play-by-play data (default True)
+        include_injuries: Whether to load injury data (default True)
+
+    Returns:
+        Dictionary with merged data:
+        - Historical: 2020, 2021, 2022, 2023, 2024 (weight: 0.30)
+        - Current: 2025 (weight: 0.70)
+        - PBP: 2020-2025 play-by-play data
+        - Injuries: 2020-2025 injury data (TANK01 for 2025, nflreadpy for 2020-2024)
+    """
+    print("\n" + "="*70)
+    print("LOADING 2020-2024 (FULL) + 2025 (CURRENT) DATA")
+    print("Historical: 2020, 2021, 2022, 2023, 2024 (weight: 0.30)")
+    print("Current: 2025 (weight: 0.70)")
+    print("="*70)
+
+    return load_hybrid_data(
+        historical_years=5,  # 2020-2024
+        current_through_week=current_through_week,
+        cache_dir=cache_dir,
+        force_refresh=force_refresh,
+        include_pbp=include_pbp,
+        include_injuries=include_injuries,
+        force_current_season=2025  # Explicitly use 2025 as current
+    )
 
 
 def validate_data_completeness(data: Dict[str, pd.DataFrame]) -> bool:
